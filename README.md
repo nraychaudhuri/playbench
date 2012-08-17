@@ -5,7 +5,7 @@ contains a stripped down (ie. 0 scala dependency) version of play 2.0 with some 
 
 download and install sbt 0.12
 =============================
-```https://github.com/harrah/xsbt/```
+https://github.com/harrah/xsbt/
 
 run
 ===
