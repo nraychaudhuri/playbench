@@ -1,0 +1,547 @@
+package play.api.libs.iteratee
+
+import play.api.libs.concurrent._
+import Enumerator.Pushee
+import play.api.libs.concurrent.execution.defaultContext
+
+object Concurrent {
+
+  trait Channel[E] {
+
+    def push(chunk: Input[E])
+
+    def push(item: E){ push(Input.El(item)) }
+
+    def end(e:Throwable)
+
+    def end()
+
+    def eofAndEnd(){
+      push(Input.EOF)
+      end()
+    }
+  }
+
+  def broadcast[E]:(Enumerator[E],Channel[E]) = {
+
+    val iteratees: List[(Iteratee[E, _], Redeemable[Iteratee[E, _]])] = (List())
+
+    def step(in: Input[E]): Iteratee[E, Unit] = {
+      val interested = iteratees
+
+      val ready = interested.map {
+        case (it,p) =>
+          it.fold {
+            case Step.Done(a, e) => Promise.pure(Left(Done(a,e)))
+            case Step.Cont(k) => {
+              val next = k(in)
+              next.pureFold {
+                case Step.Done(a, e) => Left(Done(a, e))
+                case Step.Cont(k) => Right((Cont(k),p))
+                case Step.Error(msg, e) => Left(Error(msg, e))
+              }
+            }
+            case Step.Error(msg, e) => Promise.pure(Left(Error(msg, e)))
+          }.extend1 {
+              case Redeemed(Left(s)) => 
+                p.redeem(s)
+                None
+              case Redeemed(Right(s)) =>
+                Some(s)
+              case Thrown(e) => 
+                p.throwing(e)
+                None
+            }
+      }
+
+      Iteratee.flatten(Promise.sequence(ready).map { commitReady =>
+
+        val downToZero =  { 
+          (interested.length > 0 && iteratees.length <= 0)
+        }
+
+        if (in == Input.EOF) Done((), Input.Empty) else Cont(step)
+
+      })
+    }
+
+    val redeemed = (Waiting: PromiseValue[Unit])
+
+    val enumerator = new Enumerator[E] {
+
+        def apply[A](it: Iteratee[E, A]): Promise[Iteratee[E, A]] = {
+          val result = Promise[Iteratee[E, A]]()
+         
+
+          val finished =  { 
+            redeemed match {
+              case Waiting =>
+                iteratees.asInstanceOf[Redeemable[Iteratee[E, _]]]
+                None
+              case notWaiting:NotWaiting[_] => Some(notWaiting)
+            }
+          }
+          finished.foreach {
+            case Redeemed(_) => result.redeem(it)
+            case Thrown(e) => result.throwing(e)
+          }
+          result.future
+        }
+
+    }
+
+    val mainIteratee =  (Cont(step))
+
+    val toPush = new Channel[E]{
+
+      def push(chunk: Input[E]) {
+
+        val itPromise = Promise[Iteratee[E,Unit]]()
+
+        val current: Iteratee[E,Unit] = Iteratee.flatten(itPromise.future)
+
+        val next = current.pureFold {
+          case Step.Done(a, e) => Done(a,e)
+          case Step.Cont(k) => k(chunk)
+          case Step.Error(msg, e) => Error(msg,e)
+        }
+
+        next.extend1{
+          case Redeemed(it) =>  itPromise.redeem(it)
+          case Thrown(e) => {
+            val its =  { 
+              iteratees
+            }
+            itPromise.throwing(e)
+            its.foreach { case (it, p) => p.redeem(it)}
+          }
+        }
+      }
+
+      def end(e:Throwable){
+        val current: Iteratee[E,Unit] = null
+        def endEveryone() = {
+          val its =  { 
+            iteratees
+                          }
+          its.foreach { case (it, p) => p.throwing(e)}
+        }
+
+        current.pureFold { case _ => endEveryone() }
+      }
+
+      def end() {
+        val current: Iteratee[E,Unit] = null
+        def endEveryone() = {
+          val its =  { 
+            iteratees
+          }
+          its.foreach { case (it, p) => p.redeem(it)}
+        }
+        current.pureFold { case _ => endEveryone() }
+      }
+
+    }
+    (enumerator,toPush)
+  }
+
+
+  import java.util.concurrent.{ TimeUnit }
+  def lazyAndErrIfNotReady[E](timeout:Int, unit: TimeUnit = TimeUnit.MILLISECONDS): Enumeratee[E,E] = new Enumeratee[E,E] {
+
+    def applyOn[A](inner: Iteratee[E,A]): Iteratee[E, Iteratee[E,A]] = {
+      def step(it:Iteratee[E,A]):K[E, Iteratee[E,A]] = {
+        case Input.EOF => Done(it,Input.EOF)
+
+        case other => Iteratee.flatten(it.unflatten.orTimeout((),timeout,unit).map{
+          case Left(Step.Cont(k)) => Cont(step( k(other)) )
+
+          case Left(done) => Done(done.it,other)
+
+          case Right(_) => Error("iteratee is taking too long", other)
+
+        })
+      }
+      Cont(step(inner))
+    }
+  }
+  def buffer[E](maxBuffer:Int): Enumeratee[E,E] = buffer[E](maxBuffer, length = (_:Input[E]) => 1)
+
+  def buffer[E](maxBuffer:Int, length:Input[E] => Int): Enumeratee[E,E] = new Enumeratee[E,E] {
+
+    import scala.collection.immutable.Queue
+    import play.api.libs.iteratee.Enumeratee.CheckDone
+
+    def applyOn[A](it: Iteratee[E,A]): Iteratee[E, Iteratee[E,A]] = {
+
+      val last = Promise[Iteratee[E,Iteratee[E,A]]]()
+
+      sealed trait State
+      case class Queueing(q:Queue[Input[E]],length:Long) extends State
+      case class Waiting(p:scala.concurrent.Promise[Input[E]]) extends State
+      case class DoneIt(s:Iteratee[E,Iteratee[E,A]]) extends State
+
+      val state: State = Queueing(Queue[Input[E]](),0)
+
+      def step:K[E, Iteratee[E,A]] = {
+        case in@Input.EOF =>
+          throw new RuntimeException("foo")
+        case other =>
+          val chunkLength = length(other)
+          throw new RuntimeException("foo")
+      }
+
+      def moreInput[A](k: K[E, A]): Iteratee[E,Iteratee[E,A]] = {
+        val in: Promise[Input[E]] =  { 
+            state match {
+              case Queueing(q,l) =>
+                if(!q.isEmpty){
+                  val (e,newB) = q.dequeue
+                  Promise.pure(e)
+                } else {
+                  val p = Promise[Input[E]]()
+                  p.future
+                }
+              case _ => throw new Exception("can't get here")
+            }
+         }
+         Iteratee.flatten(in.map { in => (new CheckDone[E,E] { def continue[A](cont: K[E, A]) = moreInput(cont) } &> k(in)) })
+            
+      }
+      (new CheckDone[E,E] { def continue[A](cont: K[E, A]) = moreInput(cont) } &> it).unflatten.extend1 {
+        case Redeemed(it) =>
+          last.redeem(it.it)
+        case Thrown(e) =>
+          last.throwing(e)
+      }
+      Cont(step)
+
+    }
+  }
+
+  def dropInputIfNotReady[E](duration: Long, unit: java.util.concurrent.TimeUnit = java.util.concurrent.TimeUnit.MILLISECONDS): Enumeratee[E, E] = new Enumeratee[E, E] {
+
+    val busy = false
+    def applyOn[A](it: Iteratee[E, A]): Iteratee[E, Iteratee[E, A]] = {
+
+      def step(inner: Iteratee[E, A])(in: Input[E]): Iteratee[E, Iteratee[E, A]] = {
+
+        in match {
+          case Input.EOF =>
+            Done(inner, Input.Empty)
+
+          case in =>
+            if(! busy){
+            val readyOrNot: Promise[Either[Iteratee[E, Iteratee[E, A]], Unit]] = inner.pureFold[Iteratee[E, Iteratee[E, A]]] {
+              case Step.Done(a, e) => Done(Done(a, e), Input.Empty)
+              case Step.Cont(k) => Cont { in =>
+                val next = k(in)
+                Cont(step(next))
+              }
+              case Step.Error(msg, e) => Done(Error(msg, e), Input.Empty)}.map(i => { i}).orTimeout((), duration, unit)
+
+            Iteratee.flatten(readyOrNot.map {
+              case Left(ready) =>
+                Iteratee.flatten(ready.feed(in))
+              case Right(_) =>
+                Cont(step(inner))
+            })
+            } else  Cont(step(inner))
+        }
+      }
+
+      Cont(step(it))
+    }
+  }
+
+  def unicast[E](
+    onStart: Channel[E] => Unit,
+    onComplete: => Unit,
+    onError: (String, Input[E]) => Unit = (_: String, _: Input[E]) => ()) = new Enumerator[E] {
+
+    def apply[A](it: Iteratee[E, A]): Promise[Iteratee[E, A]] = {
+      var iteratee: Iteratee[E, A] = it
+      var promise: scala.concurrent.Promise[Iteratee[E, A]] = Promise[Iteratee[E, A]]()
+
+      val pushee = new Channel[E] {
+        def close() {
+          if (iteratee != null) {
+            iteratee.feed(Input.EOF).map(result => promise.redeem(result))
+            iteratee = null
+            promise = null
+          }
+        }
+
+        def end(e:Throwable){
+          if (iteratee != null) {
+            promise.throwing(e)
+            iteratee = null
+            promise = null
+          }
+        }
+
+        def end(){
+          if (iteratee != null) {
+            promise.redeem(iteratee)
+            iteratee = null
+            promise = null
+          }
+        }
+
+        def push(item: Input[E]) {
+            iteratee = iteratee.pureFlatFold[E, A] {
+
+              case Step.Done(a, in) => {
+                onComplete
+                Done(a, in)
+              }
+
+              case Step.Cont(k) => {
+                val next = k(item)
+                next.pureFlatFold {
+                  case Step.Done(a, in) => {
+                    onComplete
+                    next
+                  }
+                  case Step.Error(msg,e) =>
+                    onError(msg,e)
+                    next
+                  case _ => next
+                }
+              }
+
+              case Step.Error(e, in) => {
+                onError(e, in)
+                Error(e, in)
+              }
+            }
+        }
+      }
+      onStart(pushee)
+      promise.future
+    }
+
+  }
+
+  def broadcast[E](e: Enumerator[E], interestIsDownToZero:Broadcaster => Unit= _=>()): (Enumerator[E],Broadcaster) = {lazy val h:Hub[E] = hub(e,() => interestIsDownToZero(h)); (h.getPatchCord(),h) }
+
+  trait Broadcaster {
+    def noCords(): Boolean
+
+    def close()
+
+    def closed(): Boolean
+
+  }
+
+  @scala.deprecated("use Concurrent.broadcast instead", "2.1.0")
+  trait Hub[E] extends Broadcaster {
+
+    def getPatchCord(): Enumerator[E]
+
+  }
+
+  @scala.deprecated("use Concurrent.broadcast instead", "2.1.0")
+  def hub[E](e: Enumerator[E], interestIsDownToZero: () => Unit = () => ()): Hub[E] = {
+
+
+    val iteratees: List[(Iteratee[E, _], Redeemable[Iteratee[E, _]])] = (List())
+
+    val started = false
+
+    var closeFlag = false
+
+    def step(in: Input[E]): Iteratee[E, Unit] = {
+      val interested: List[(Iteratee[E, _], Redeemable[Iteratee[E, _]])] = iteratees
+
+      val commitReady: List[(Int, (Iteratee[E, _], Redeemable[Iteratee[E, _]]))] = (List())
+
+      val commitDone: List[Int] = (List())
+
+      val ready = interested.zipWithIndex.map {
+        case (t, index) =>
+          val p = t._2
+          t._1.fold {
+            case Step.Done(a, e) =>
+              p.redeem(Done(a, e))
+              Promise.pure(())
+
+            case Step.Cont(k) =>
+              val next = k(in)
+              next.pureFold {
+                case Step.Done(a, e) => {
+                  p.redeem(Done(a, e))
+                }
+                case Step.Cont(k) => 
+                  p.redeem(Step.Cont(k).asInstanceOf[play.api.libs.iteratee.Iteratee[E, _]])
+                case Step.Error(msg, e) => {
+                  p.redeem(Error(msg, e))
+                }
+              }
+
+            case Step.Error(msg, e) =>
+              p.redeem(Error(msg, e))
+              Promise.pure(())
+          }.extend1 {
+              case Redeemed(a) => a
+              case Thrown(e) => p.throwing(e)
+              case _ => throw new RuntimeException("should be either Redeemed or Thrown at this point")
+
+            }
+      }.fold(Promise.pure()) { (s, p) => s.flatMap(_ => p) }
+
+      Iteratee.flatten(ready.map { _ =>
+
+        val downToZero =  { 
+          val ready = commitReady.toMap
+           (interested.length > 0 && iteratees.length <= 0)
+
+        }
+        if (downToZero) interestIsDownToZero()
+        if (in == Input.EOF || closeFlag) Done((), Input.Empty) else Cont(step)
+
+      })
+    }
+
+    new Hub[E] {
+
+      def noCords() = iteratees.isEmpty
+
+      def close() {
+        closeFlag = true
+      }
+
+      def closed() = closeFlag
+
+      val redeemed = (Waiting: PromiseValue[Iteratee[E, Unit]])
+      def getPatchCord() = new Enumerator[E] {
+
+        def apply[A](it: Iteratee[E, A]): Promise[Iteratee[E, A]] = {
+          val result = Promise[Iteratee[E, A]]()
+          val alreadyStarted = !started
+          if (!alreadyStarted) {
+            val promise = (e |>> Cont(step))
+            promise.extend1 { v =>
+              val its =  { 
+                iteratees
+              }
+              v match {
+                case Thrown(e) =>
+                  its.foreach { case (_, p) => p.throwing(e) }
+
+                case Redeemed(_) =>
+                  its.foreach { case (it, p) => p.redeem(it) }
+              }
+            }
+          }
+          val finished =  { 
+            redeemed match {
+              case Waiting =>
+                iteratees.asInstanceOf[Redeemable[Iteratee[E, _]]]
+                None
+              case notWaiting => Some(notWaiting)
+            }
+          }
+          finished.foreach {
+            case Redeemed(_) => result.redeem(it)
+            case Thrown(e) => result.throwing(e)
+            case _ => throw new RuntimeException("should be either Redeemed or Thrown")
+          }
+          result.future
+        }
+
+      }
+
+    }
+  }
+
+  trait PatchPanel[E] {
+
+    def patchIn(e: Enumerator[E]): Boolean
+
+    def closed(): Boolean
+
+  }
+  def patchPanel[E](patcher: PatchPanel[E] => Unit): Enumerator[E] = new Enumerator[E] {
+
+    def apply[A](it: Iteratee[E, A]): Promise[Iteratee[E, A]] = {
+      val result = Promise[Iteratee[E, A]]()
+      var isClosed: Boolean = false
+
+      result.future.extend1(_ => isClosed = true);
+
+      def refIteratee(ref: Iteratee[E, Option[A]]): Iteratee[E, Option[A]] = {
+        val next = Promise[Iteratee[E, Option[A]]]()
+        val current = Iteratee.flatten(next.future)
+        current.pureFlatFold {
+          case Step.Done(a, e) => {
+            a.foreach(aa => result.redeem(Done(aa, e)))
+            next.redeem(Done(a, e))
+            Done(a, e)
+          }
+          case Step.Cont(k) => {
+            next.redeem(current)
+            Cont(step(ref))
+          }
+          case Step.Error(msg, e) => {
+            result.redeem(Error(msg, e))
+            next.redeem(Error(msg, e))
+            Error(msg, e)
+
+          }
+        }
+
+      }
+
+      def step(ref: Iteratee[E, Option[A]])(in: Input[E]): Iteratee[E, Option[A]] = {
+        val next = Promise[Iteratee[E, Option[A]]]()
+        val current = Iteratee.flatten(next.future)
+        current.pureFlatFold {
+          case Step.Done(a, e) => {
+            next.redeem(Done(a, e))
+            Done(a, e)
+          }
+          case Step.Cont(k) => {
+            val n = k(in)
+            next.redeem(n)
+            n.pureFlatFold {
+              case Step.Done(a, e) => {
+                a.foreach(aa => result.redeem(Done(aa, e)))
+                Done(a, e)
+              }
+              case Step.Cont(k) => Cont(step(ref))
+              case Step.Error(msg, e) => {
+                result.redeem(Error(msg, e))
+                Error(msg, e)
+              }
+            }
+          }
+          case Step.Error(msg, e) => {
+            next.redeem(Error(msg, e))
+            Error(msg, e)
+          }
+        }
+      }
+
+      patcher(new PatchPanel[E] {
+
+        def closed() = isClosed
+
+        def patchIn(e: Enumerator[E]): Boolean = {
+          !(closed() || {
+            val newRef = { 
+              val it = Done(None, Input.Empty)
+              val newRef = it
+              newRef
+            }
+            e |>> refIteratee(newRef.asInstanceOf[play.api.libs.iteratee.Iteratee[E,Option[A]]]) //TODO maybe do something if the enumerator is done, maybe not
+            false
+          })
+        }
+      })
+
+      result.future
+
+    }
+  }
+}
