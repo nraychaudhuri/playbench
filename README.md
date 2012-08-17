@@ -25,4 +25,4 @@ this will download and install the latest snapshot from https://oss.sonatype.org
 how to run it with a local snapshot
 ===================================
 
-replace 2.10.0-SNAPSHOT jars in ~/.ivy2/cache/org.scala-lang
+replace 2.10.0-SNAPSHOT jars in ```~/.ivy2/cache/org.scala-lang```
