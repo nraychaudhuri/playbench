@@ -1,7 +1,7 @@
 playbench
 =========
 
-contains a stripped down (ie. 0 scala dependency) version play 2.0 with some generated source files thrown in for good measure
+contains a stripped down (ie. 0 scala dependency) version of play 2.0 with some generated source files thrown in for good measure
 
 download and install sbt 0.12
 =============================
