@@ -20,6 +20,7 @@ object MinimalBuild extends Build {
     },
     //useful for 2.9.1 SIP14 unmanagedSourceDirectories in Compile ++= Seq(sip14),
     organization := "com.typesafe",
+    //scalacOptions ++= Seq("-encoding", "UTF-8", "-Xlint","-deprecation", "-unchecked"),
     resolvers += "oss" at "https://oss.sonatype.org/content/repositories/snapshots",
     resolvers += repo,
     scalaVersion := scalaVer.getOrElse("2.9.2"),

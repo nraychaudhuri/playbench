@@ -36,6 +36,8 @@ class Application(val path: File, val classloader: ClassLoader, val sources: Opt
 
   private val initialConfiguration = Threads.withContextClassLoader(classloader) {
     Configuration.load(path, mode)
+
+
   }
 
   // -- Global stuff
@@ -76,7 +78,10 @@ class Application(val path: File, val classloader: ClassLoader, val sources: Opt
   /**
    * The router used by this application (if defined).
    */
+   
   val routes: Option[Router.Routes] = try {
+
+
     Some(classloader.loadClass(configuration.getString("application.router").map(_ + "$").getOrElse("Routes$")).getDeclaredField("MODULE$").get(null).asInstanceOf[Router.Routes]).map { router =>
       router.setPrefix(configuration.getString("application.context").map { prefix =>
         if (!prefix.startsWith("/")) {

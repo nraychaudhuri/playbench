@@ -11,7 +11,6 @@ object Router {
 
   import scala.util.parsing.input._
   import scala.util.parsing.combinator._
-  import scala.util.matching._
 
   /**
    * captures URL parts

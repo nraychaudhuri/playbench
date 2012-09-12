@@ -54,13 +54,7 @@ case controllers_Application_index0(params) => {
 }
           
 
-// @LINE:9
-case controllers_Application_sayHello1(params) => {
-   call { 
-        invokeHandler(_root_.controllers.Application.sayHello, HandlerDef(this, "controllers.Application", "sayHello", Nil))
-   }
-}
-          
+         
 
 
           
