@@ -3,6 +3,8 @@ playbench
 
 contains a stripped down (ie. 0 scala dependency) version of play 2.0 with some generated source files thrown in for good measure
 
+This project is useful for benchmarking compilation performance.
+
 download and install sbt 0.12
 =============================
 https://github.com/harrah/xsbt/
