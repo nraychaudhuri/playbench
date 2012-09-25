@@ -19,6 +19,7 @@ object MinimalBuild extends Build {
                 else                                   Some("releases"  at nexus + "ivy-releases/")
     },
     //useful for 2.9.1 SIP14 unmanagedSourceDirectories in Compile ++= Seq(sip14),
+    unmanagedSourceDirectories in Compile ++= Seq(sip14),
     organization := "com.typesafe",
     //scalacOptions ++= Seq("-encoding", "UTF-8", "-Xlint","-deprecation", "-unchecked"),
     resolvers += "oss" at "https://oss.sonatype.org/content/repositories/snapshots",
