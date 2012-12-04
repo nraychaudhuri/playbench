@@ -3,7 +3,6 @@ package play.core.server.netty
 import org.jboss.netty.channel.ChannelFuture
 import play.api.libs.concurrent._
 import scala.concurrent.{ ExecutionContext, CanAwait}
-import scala.concurrent.duration.Duration
 import java.util.concurrent.TimeUnit
 import org.jboss.netty.channel.ChannelFutureListener
 

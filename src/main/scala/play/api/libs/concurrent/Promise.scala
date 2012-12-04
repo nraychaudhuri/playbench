@@ -124,7 +124,7 @@ class PlayPromise[+A](fu:scala.concurrent.Future[A]){
    * time. Unlike Await.result() in Akka, does NOT throw an exception from the Promise itself.
    */
   def await(timeout: Long, unit: TimeUnit = TimeUnit.MILLISECONDS): NotWaiting[A] = {
-    scala.concurrent.Await.ready(fu,scala.concurrent.duration.Duration(timeout,unit))
+    scala.concurrent.Await.ready(fu,null)
     Redeemed(fu.value.get.asInstanceOf[A])
   }
 
